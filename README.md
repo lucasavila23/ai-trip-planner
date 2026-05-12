@@ -1,78 +1,238 @@
 # Voice Trip Planner
 
-A voice-powered trip planning prototype built with Streamlit, Whisper, Gemini, and LangChain agents.
+A voice-powered trip planning prototype built for the IE University AI/ML course final project. The user speaks naturally to describe a trip; the app transcribes the audio, holds a multi-turn conversation to collect all necessary details, then scrapes real-time flights, hotels, and activities in parallel, and reads the results back aloud.
 
-## What it does
+---
 
-1. **Listen** – speak into your microphone to describe your trip
-2. **Converse** – a Gemini-powered assistant asks follow-up questions to collect origin, destination, dates, number of travellers, and optional budget
-3. **Search** – three browser agents scrape Google Flights, Booking.com, and TripAdvisor in parallel
-4. **Summarise** – results are displayed in the UI and read back to you via text-to-speech
+## Demo flow
 
-## Tech stack
+```
+User speaks → Whisper transcribes → Gemini converses →
+  (confirmed) → 3 Playwright scrapers run concurrently →
+    Pydantic structures each result → Gemini writes summary →
+      UI renders tables + plays TTS audio
+```
 
-| Component | Technology |
-|-----------|-----------|
-| LLM | Gemini 2.5 Flash (`langchain-google-genai`) |
-| Speech-to-Text | Whisper Small (HuggingFace, local) |
-| Text-to-Speech | edge-tts `en-US-JennyNeural` (local) |
-| Web scraping | Playwright + LangChain browser toolkit |
-| Structured outputs | Pydantic + `with_structured_output` |
-| UI | Streamlit + `streamlit-mic-recorder` |
+---
 
-## Setup
+## Quick start
 
-### 1. Install dependencies
+### 1. Clone and enter the project
+
+```bash
+git clone https://github.com/lucasavila23/ai-trip-planner.git
+cd ai-trip-planner
+```
+
+### 2. Create and activate the virtual environment
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate      # macOS / Linux
+# .venv\Scripts\activate       # Windows
+```
+
+### 3. Install Python dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. Install Playwright browsers
+### 4. Install the Playwright browser
 
 ```bash
-playwright install
+playwright install chromium
 ```
 
-### 3. Set your Gemini API key
+### 5. Set your Gemini API key
 
 ```bash
 export GEMINI_API_KEY="your-key-here"
 ```
 
-Get a free key at <https://aistudio.google.com/app/apikey>.
+Get a free key at <https://aistudio.google.com/app/apikey>. The free tier is enough to run the app.
 
-### 4. Run the app
+### 6. Run
 
 ```bash
 streamlit run app.py
 ```
 
-The app opens at `http://localhost:8501`.
+Opens at `http://localhost:8501`.
+
+---
 
 ## Project structure
 
 ```
 trip_planner/
-├── app.py                  # Streamlit UI
-├── config.py               # Gemini LLM factory (single source of model name)
-├── stt.py                  # Whisper transcription
-├── tts.py                  # edge-tts text-to-speech
+│
+├── app.py                   # Streamlit entry point — UI logic and state
+├── config.py                # LLM factory (single source of model name + API key)
+│
+├── stt.py                   # Speech-to-Text: Whisper Small via HuggingFace pipeline
+├── tts.py                   # Text-to-Speech: edge-tts with Jenny Neural voice
+│
 ├── models/
-│   └── schemas.py          # Pydantic data models
+│   └── schemas.py           # All Pydantic models shared across the codebase
+│
 ├── agents/
-│   ├── conversation.py     # Multi-turn trip-detail collection agent
-│   └── supervisor.py       # Orchestrates parallel scraping + summary
+│   ├── conversation.py      # Stateful multi-turn ConversationAgent (collects trip details)
+│   └── supervisor.py        # Orchestrates parallel scraping + generates spoken summary
+│
 ├── scrapers/
-│   ├── flights.py          # Google Flights browser agent
-│   ├── hotels.py           # Booking.com browser agent
-│   └── activities.py       # TripAdvisor browser agent
-└── requirements.txt
+│   ├── flights.py           # Two-stage scraper: Playwright → Gemini structure → FlightResults
+│   ├── hotels.py            # Two-stage scraper: Playwright → Gemini structure → HotelResults
+│   └── activities.py        # Two-stage scraper: Playwright → Gemini structure → ActivityResults
+│
+├── requirements.txt         # Direct dependencies (unpinned)
+├── requirements.lock.txt    # Exact pinned versions from the working venv
+└── README.md
 ```
 
-## Notes
+---
 
-- Whisper and the Playwright browser are cached with `@st.cache_resource` so they load only once per session.
-- All three scrapers share a single browser instance created in `supervisor.py`.
-- If any individual scraper fails the others continue; an empty list is shown with a friendly message.
-- The model name (`gemini-2.5-flash`) is defined in exactly one place: `config.py`.
+## Architecture
+
+### Overview diagram
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         Streamlit UI (app.py)                   │
+│                                                                  │
+│  [mic_recorder] ──► stt.transcribe() ──► ConversationAgent      │
+│                                               │                  │
+│                                    (TripQuery confirmed?)        │
+│                                               │ yes              │
+│                                    supervisor.run_search()       │
+│                                    ┌──────────┴──────────┐      │
+│                            search_flights  search_hotels  search_activities
+│                                    └──────────┬──────────┘      │
+│                                         TripResults              │
+│                                               │                  │
+│                               st.dataframe ◄──┘                  │
+│                               tts.speak_sync() → st.audio()     │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Layer 1 — Data models (`models/schemas.py`)
+
+All data contracts live in a single file. Every scraper, agent, and UI component imports from here — nothing defines its own schema inline.
+
+| Model | Purpose |
+|---|---|
+| `TripQuery` | Collected trip intent: origin, destination, dates, people, budget, confirmed flag |
+| `Flight` | Single flight option |
+| `FlightResults` | Wrapper list used with `with_structured_output` |
+| `Hotel` | Single hotel option with cancellation info |
+| `HotelResults` | Wrapper list |
+| `Activity` | Attraction with a fixed Literal category enum |
+| `ActivityResults` | Wrapper list |
+| `TripResults` | Final assembled result: query + all three lists + summary text |
+
+### Layer 2 — STT / TTS (`stt.py`, `tts.py`)
+
+**Speech-to-Text** runs Whisper Small entirely locally. The HuggingFace pipeline is wrapped in `@st.cache_resource` so it loads once and stays hot across Streamlit reruns. Raw audio bytes from the mic recorder are read with `soundfile`, averaged to mono, cast to `float32`, and fed to Whisper.
+
+**Text-to-Speech** uses `edge-tts` (Microsoft's free neural TTS, no API key). The async `speak()` coroutine is wrapped in `speak_sync()` which handles the `nest_asyncio` + running event loop edge case that Streamlit creates. Returns raw MP3 bytes that Streamlit plays directly with `st.audio(autoplay=True)`.
+
+### Layer 3 — Conversation agent (`agents/conversation.py`)
+
+`ConversationAgent` keeps a `messages` list and appends every turn (user + assistant). Each call invokes the LLM with `with_structured_output(_ConversationOutput)`, a small wrapper schema that holds:
+
+- `reply: str` — the text to show the user
+- `trip_query: Optional[TripQuery]` — only populated once the LLM has all details and `confirmed=True`
+
+The system prompt instructs the model to ask one question at a time and only set `confirmed=True` when the user explicitly agrees to a summary. This avoids premature confirmation from partial answers.
+
+### Layer 4 — Scrapers (`scrapers/`)
+
+Each scraper follows the **exact two-stage pattern** from the course cheatsheet (S26.3):
+
+**Stage 1 — Browser agent (raw text)**
+
+A LangChain `ReAct` agent gets the full `PlayWrightBrowserToolkit` (7 tools: navigate, extract_text, extract_hyperlinks, get_elements, click_element, navigate_back, current_webpage). It receives a natural-language scraping goal and autonomously navigates the target site, returning raw text.
+
+**Stage 2 — Structured output (typed objects)**
+
+The raw text is passed to `get_llm().with_structured_output(XxxResults)`, which guarantees a validated Pydantic object. If stage 2 fails (e.g. the page returned garbage), an empty list is returned rather than crashing.
+
+| Scraper | Target | Pydantic schema |
+|---|---|---|
+| `flights.py` | google.com/travel/flights | `FlightResults` |
+| `hotels.py` | booking.com | `HotelResults` |
+| `activities.py` | tripadvisor.com/Attractions | `ActivityResults` |
+
+### Layer 5 — Supervisor (`agents/supervisor.py`)
+
+`run_search()` fires all three scrapers concurrently with `asyncio.gather(..., return_exceptions=True)`. Individual failures are caught per-result — a `BaseException` instance means that scraper failed silently, and its slot becomes an empty list. The rest continue normally.
+
+After gathering, a final Gemini call generates a 3-sentence spoken summary highlighting the best option from each category. This is the only sequential step after the parallel scrape.
+
+The Playwright browser is created once via `@st.cache_resource` in `supervisor.py` and passed to each scraper call. All three scrapers share the same browser process.
+
+### Layer 6 — UI (`app.py`)
+
+Three logical sections driven by `st.session_state`:
+
+| State | Section shown |
+|---|---|
+| No `trip_query` | Chat panel + mic recorder |
+| `trip_query` set, not yet searched | Spinner while `run_search` executes |
+| `trip_results` set | Three expanders with dataframes + summary audio |
+
+`nest_asyncio.apply()` is called at the very top of `app.py` (before any imports that touch asyncio) because Streamlit runs its own event loop and `asyncio.gather` would otherwise deadlock.
+
+---
+
+## Technology choices and rationale
+
+### LLM — Gemini 2.5 Flash
+
+Chosen for its long context window (1M tokens), which is important for scraper output that can be verbose, and its structured output support via LangChain's `with_structured_output`. Flash tier is fast enough for interactive use and free via AI Studio. The model name is defined in exactly one place (`config.py`) so swapping to a different model requires a single edit.
+
+### STT — Whisper Small (local)
+
+Running Whisper locally avoids latency from a round-trip API call and eliminates the need for a second API key. The "small" checkpoint (244M parameters) fits easily in CPU RAM and transcribes a short voice clip in under 2 seconds on modern hardware. `@st.cache_resource` ensures the model loads once per session.
+
+### TTS — edge-tts (local)
+
+Microsoft's `edge-tts` library streams neural TTS audio without an API key by calling the same endpoint the Edge browser uses. `en-US-JennyNeural` is a natural-sounding conversational voice. Audio bytes are returned directly to Streamlit's `st.audio` component, which supports `autoplay=True` for a hands-free experience.
+
+### Web scraping — Playwright + LangChain browser toolkit
+
+Structured scraping APIs (e.g. dedicated flight APIs) either require paid keys or have strict rate limits. Playwright gives a real browser that handles JavaScript rendering, cookie banners, and dynamic content. The LangChain `PlayWrightBrowserToolkit` wraps it in 7 LangChain tools, letting a ReAct agent navigate autonomously without brittle CSS selectors. A single shared browser instance (cached in `supervisor.py`) avoids the overhead of launching three separate browsers.
+
+### Structured outputs — Pydantic `with_structured_output`
+
+Using `llm.with_structured_output(Schema)` guarantees that every field has the correct Python type (e.g. `price_eur: float`, not a string like `"€199"`). The LLM is also given conversion instructions ("convert to EUR if needed") in the stage-2 prompt, so currency mismatches are handled at the structuring step rather than in post-processing code.
+
+### Orchestration — `asyncio.gather` (no agent framework for parallelism)
+
+The three scrapers are independent and have no shared state, making `asyncio.gather` the right tool: simpler, more transparent, and faster than a LangGraph workflow for this use case. A full multi-agent framework would add indirection without benefit here.
+
+### UI — Streamlit
+
+Streamlit's session state model maps naturally to the app's three phases (conversation → loading → results). `streamlit-mic-recorder` provides a push-to-talk button that works directly in the browser without requiring OS-level microphone permissions setup.
+
+---
+
+## Environment details
+
+- **Python**: 3.12
+- **Virtual env**: `.venv/` (standard `venv`, not conda)
+- **Pinned versions**: `requirements.lock.txt` (generated from the working install)
+- **Playwright browser**: Chromium (headless)
+
+---
+
+## Common issues
+
+| Issue | Fix |
+|---|---|
+| `GEMINI_API_KEY not set` | `export GEMINI_API_KEY="..."` before running |
+| `playwright install` not run | Run `playwright install chromium` inside the venv |
+| Mic not working in browser | Allow microphone access when the browser prompts |
+| `soundfile` read error on audio | Some browser mic encodings need `ffmpeg`; install with `brew install ffmpeg` |
+| Scraper returns empty list | The target site may have changed layout — the LLM still extracts what it can |
+| Streamlit rerun clears spinner | This is expected; state is preserved in `st.session_state` |

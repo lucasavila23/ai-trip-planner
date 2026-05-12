@@ -1,0 +1,16 @@
+streamlit
+streamlit-mic-recorder
+langchain
+langchain-google-genai
+langchain-community
+langgraph
+langchainhub
+transformers
+torch
+numpy<2
+soundfile
+edge-tts
+playwright
+lxml
+nest_asyncio
+pydantic

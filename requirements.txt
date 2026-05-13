@@ -9,6 +9,7 @@ transformers
 torch
 numpy<2
 soundfile
+pydub
 edge-tts
 playwright
 lxml

@@ -16,7 +16,7 @@ from scrapers.activities import search_activities
 @st.cache_resource
 def _get_browser_toolkit() -> PlayWrightBrowserToolkit:
     """Single shared Playwright browser instance cached across Streamlit reruns."""
-    async_browser = create_async_playwright_browser(headless=True)
+    async_browser = create_async_playwright_browser(headless=False)
     return PlayWrightBrowserToolkit.from_browser(async_browser=async_browser)
 
 

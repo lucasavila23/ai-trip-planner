@@ -57,15 +57,23 @@ BOT_SIGNALS = (
     "press and hold",
     "checking your browser",
     "enable javascript and cookies to continue",
+    # Stealth-block patterns that masquerade as innocent errors:
+    "we had trouble loading the page",
+    "unexpected error",
+    "reload page\ncontact support",
 )
 
 # Hard cap on text we ship to the LLM — keeps the prompt fast and cheap.
 MAX_TEXT_CHARS = 20_000
 
+# Minimum body length we'll trust. A real results page is always >> 1000 chars;
+# anything under this is either a stealth-block or an empty SPA shell.
+MIN_VALID_LENGTH = 800
+
 
 def looks_blocked(text: str) -> bool:
     """Heuristic: does this page look like an interstitial / bot wall?"""
-    if not text or len(text) < 300:
+    if not text or len(text) < MIN_VALID_LENGTH:
         return True
     low = text[:4000].lower()
     return any(sig in low for sig in BOT_SIGNALS)
@@ -111,6 +119,14 @@ async def fetch_page_text(
         },
     )
     await context.add_init_script(_STEALTH_INIT_JS)
+
+    # Skip Google's GDPR consent wall, which otherwise hides every flight/hotel
+    # result behind an interstitial. Same trick the Edge browser uses.
+    await context.add_cookies([
+        {"name": "CONSENT", "value": "YES+1", "domain": ".google.com", "path": "/"},
+        {"name": "SOCS", "value": "CAESHAgBEhJnd3NfMjAyMzA4MjEtMF9SQzIaAmVuIAEaBgiAhcOnBg",
+         "domain": ".google.com", "path": "/"},
+    ])
 
     page: Page = await context.new_page()
     try:

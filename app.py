@@ -1,3 +1,56 @@
+"""Streamlit entry point for the Voice Trip Planner.
+
+You can launch this either way and it will Just Work:
+
+    .venv/bin/streamlit run app.py       # the canonical way
+    python app.py                        # auto-bootstraps via the block below
+
+The bootstrap re-execs through the project's .venv and through `streamlit run`
+if we detect we're not already in that state.
+"""
+
+# ── Auto-bootstrap: any python + any launcher → streamlit run inside .venv ──
+import os
+import sys
+
+
+def _auto_bootstrap() -> None:
+    here = os.path.dirname(os.path.abspath(__file__))
+    venv_dir = os.path.join(here, ".venv")
+    venv_py = os.path.join(venv_dir, "bin", "python")
+
+    # Step 1: if a project venv exists and we're not using it, switch.
+    # We compare paths textually (not realpath), because .venv/bin/python
+    # is a symlink back to the system Python — realpath would say they're
+    # the same binary and skip the switch, but the venv has different
+    # site-packages we *do* need.
+    if os.path.exists(venv_py):
+        if not os.path.abspath(sys.executable).startswith(venv_dir + os.sep):
+            print(f"[bootstrap] re-exec via {venv_py}", file=sys.stderr)
+            os.execvp(venv_py, [venv_py, "-m", "streamlit", "run",
+                                os.path.abspath(__file__)])
+
+    # Step 2: we're on the right python; ensure we're under `streamlit run`.
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+    except ImportError:
+        sys.stderr.write(
+            "Streamlit is not installed in this Python. From the project root:\n"
+            "  python3 -m venv .venv && source .venv/bin/activate && "
+            "pip install -r requirements.txt\n"
+        )
+        sys.exit(1)
+
+    if get_script_run_ctx() is None:
+        print("[bootstrap] re-exec under `streamlit run`", file=sys.stderr)
+        os.execvp(sys.executable,
+                  [sys.executable, "-m", "streamlit", "run",
+                   os.path.abspath(__file__)])
+
+
+_auto_bootstrap()
+# ── End bootstrap ───────────────────────────────────────────────────────────
+
 import asyncio
 
 import nest_asyncio

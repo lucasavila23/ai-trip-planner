@@ -9,47 +9,65 @@ from models.schemas import Flight, FlightResults, TripQuery
 from scrapers._browser import fetch_page_text, looks_blocked, trim
 
 
+def _has_flight_content(text: str) -> bool:
+    """Reject pages that loaded but contain no actual flight data.
+
+    A real results page always shows at least one currency symbol AND at
+    least one routing keyword (nonstop / stop / hr / depart). A site
+    homepage or empty SPA shell would pass `looks_blocked` (it's long
+    enough, no captcha) but fail this check.
+    """
+    low = text.lower()
+    has_price = ("€" in text) or ("eur" in low) or ("$" in text) or ("£" in text)
+    has_routing = any(kw in low for kw in ("nonstop", "non-stop", " stop", " hr ", "departing"))
+    return has_price and has_routing
+
+
 async def search_flights(query: TripQuery, browser: Browser) -> list[Flight]:
     """Scrape flight options for a TripQuery and return structured Flight objects.
 
-    Uses Kayak as the primary source — it accepts city names directly in the
-    URL and renders prices server-side. Falls back to Google Flights search if
-    the primary is blocked. Returns [] (not exception) on hard failure so the
+    Tries Google Flights first (consistently reliable with city names + EUR
+    output) and falls back to Kayak. Returns `[]` rather than raising so the
     supervisor can still assemble a partial TripResults.
     """
-    origin = quote_plus(query.origin)
-    destination = quote_plus(query.destination)
+    origin = query.origin
+    destination = query.destination
     depart = query.check_in.strftime("%Y-%m-%d")
     ret = query.check_out.strftime("%Y-%m-%d")
 
-    primary = (
-        f"https://www.kayak.com/flights/{origin}-{destination}/{depart}/{ret}"
-        f"?sort=bestflight_a"
-    )
-    fallback = (
+    google_url = (
         "https://www.google.com/travel/flights?hl=en&curr=EUR&q="
         + quote_plus(
-            f"flights from {query.origin} to {query.destination} "
-            f"on {depart} returning {ret}"
+            f"flights from {origin} to {destination} on {depart} returning {ret}"
         )
+    )
+    kayak_url = (
+        f"https://www.kayak.com/flights/{quote_plus(origin)}-{quote_plus(destination)}/"
+        f"{depart}/{ret}?sort=bestflight_a"
     )
 
     raw_text = ""
-    for url in (primary, fallback):
+    for label, url, wait in (
+        ("google", google_url, 6.0),
+        ("kayak", kayak_url, 5.0),
+    ):
         raw_text = await fetch_page_text(
             browser,
             url,
             wait_for_selector='[class*="result"], [aria-label*="flight" i], [role="listitem"]',
-            extra_wait=4.0,
+            extra_wait=wait,
         )
+        valid = (not looks_blocked(raw_text)) and _has_flight_content(raw_text)
         print("\n" + "=" * 60)
-        print(f"[FLIGHTS] {url[:70]}")
-        print(f"[FLIGHTS] length={len(raw_text)} first 300: {raw_text[:300]!r}")
+        print(f"[FLIGHTS:{label}] {url[:80]}")
+        print(f"[FLIGHTS:{label}] len={len(raw_text)} valid={valid}")
+        print(f"[FLIGHTS:{label}] first 200: {raw_text[:200]!r}")
         print("=" * 60 + "\n")
-        if not looks_blocked(raw_text):
+        if valid:
             break
 
-    if looks_blocked(raw_text):
+    if not _has_flight_content(raw_text):
+        print("[FLIGHTS] no usable content from either source")
         return []
 
     structuring_llm = get_llm().with_structured_output(FlightResults)

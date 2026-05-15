@@ -81,9 +81,10 @@ trip_planner/
 │   └── supervisor.py        # Orchestrates parallel scraping + generates spoken summary
 │
 ├── scrapers/
-│   ├── flights.py           # Two-stage scraper: Playwright → Gemini structure → FlightResults
-│   ├── hotels.py            # Two-stage scraper: Playwright → Gemini structure → HotelResults
-│   └── activities.py        # Two-stage scraper: Playwright → Gemini structure → ActivityResults
+│   ├── _browser.py          # Shared stealth Playwright helper (UA, headers, anti-bot init script)
+│   ├── flights.py           # Two-stage scraper: stealth fetch → Gemini structure → FlightResults
+│   ├── hotels.py            # Two-stage scraper: stealth fetch → Gemini structure → HotelResults
+│   └── activities.py        # Two-stage scraper: stealth fetch → Gemini structure → ActivityResults
 │
 ├── requirements.txt         # Direct dependencies (unpinned)
 ├── requirements.lock.txt    # Exact pinned versions from the working venv
@@ -147,29 +148,31 @@ The system prompt instructs the model to ask one question at a time and only set
 
 ### Layer 4 — Scrapers (`scrapers/`)
 
-Each scraper follows the **exact two-stage pattern** from the course cheatsheet (S26.3):
+Each scraper follows the **two-stage pattern** from the course cheatsheet (S26.3):
 
-**Stage 1 — Browser agent (raw text)**
+**Stage 1 — Stealth Playwright fetch (raw text)**
 
-A LangChain `ReAct` agent gets the full `PlayWrightBrowserToolkit` (7 tools: navigate, extract_text, extract_hyperlinks, get_elements, click_element, navigate_back, current_webpage). It receives a natural-language scraping goal and autonomously navigates the target site, returning raw text.
+A shared `scrapers/_browser.py` helper opens a fresh `BrowserContext` per scrape with anti-bot countermeasures: a real desktop user-agent, `Accept-Language` / `Sec-Ch-Ua` headers, and an init script that masks `navigator.webdriver`, fakes `navigator.plugins`, and shims `window.chrome`. The page is loaded with `wait_until=domcontentloaded`, then waits for a result selector, then for `networkidle`, then scrolls to trigger lazy-loaded cards before returning `inner_text("body")`. The result is trimmed (head + tail, 20k chars max) before being sent to the LLM.
+
+If the rendered text matches a known bot-wall signal (`captcha`, `verify you are human`, `unusual traffic`, …) or is shorter than 300 chars, the scraper switches to a fallback URL (where one is defined) and on second failure returns `[]`.
 
 **Stage 2 — Structured output (typed objects)**
 
-The raw text is passed to `get_llm().with_structured_output(XxxResults)`, which guarantees a validated Pydantic object. If stage 2 fails (e.g. the page returned garbage), an empty list is returned rather than crashing.
+The raw text is passed to `get_llm().with_structured_output(XxxResults)`, which guarantees a validated Pydantic object. Stage 2 is wrapped in try/except and returns `[]` if the LLM call fails, so a single bad page never crashes the whole search.
 
-| Scraper | Target | Pydantic schema |
-|---|---|---|
-| `flights.py` | google.com/travel/flights | `FlightResults` |
-| `hotels.py` | booking.com | `HotelResults` |
-| `activities.py` | tripadvisor.com/Attractions | `ActivityResults` |
+| Scraper | Primary target | Fallback | Pydantic schema |
+|---|---|---|---|
+| `flights.py` | kayak.com | google.com/travel/flights | `FlightResults` |
+| `hotels.py` | booking.com | — | `HotelResults` |
+| `activities.py` | getyourguide.com | tripadvisor.com | `ActivityResults` |
 
 ### Layer 5 — Supervisor (`agents/supervisor.py`)
 
-`run_search()` fires all three scrapers concurrently with `asyncio.gather(..., return_exceptions=True)`. Individual failures are caught per-result — a `BaseException` instance means that scraper failed silently, and its slot becomes an empty list. The rest continue normally.
+`run_search()` fires all three scrapers concurrently with `asyncio.gather(..., return_exceptions=True)`. Individual failures are caught per-result — a `BaseException` instance means that scraper crashed, and its slot becomes an empty list. The rest continue normally. Scrapers also already handle their own soft failures (blocked, structuring error) by returning `[]` directly.
 
-After gathering, a final Gemini call generates a 3-sentence spoken summary highlighting the best option from each category. This is the only sequential step after the parallel scrape.
+After gathering, a final Gemini call generates a 3-sentence spoken summary highlighting the best option from each category. If the summary call itself fails, a deterministic fallback string is used so the UI always has something to render and read aloud.
 
-The Playwright browser is created once via `@st.cache_resource` in `supervisor.py` and passed to each scraper call. All three scrapers share the same browser process.
+The Playwright browser is created once via `@st.cache_resource` in `supervisor.py` and passed to each scraper call. All three scrapers share the same browser process but open their own isolated `BrowserContext` per scrape, so cookies and stealth state don't bleed across sites.
 
 ### Layer 6 — UI (`app.py`)
 
@@ -199,9 +202,11 @@ Running Whisper locally avoids latency from a round-trip API call and eliminates
 
 Microsoft's `edge-tts` library streams neural TTS audio without an API key by calling the same endpoint the Edge browser uses. `en-US-JennyNeural` is a natural-sounding conversational voice. Audio bytes are returned directly to Streamlit's `st.audio` component, which supports `autoplay=True` for a hands-free experience.
 
-### Web scraping — Playwright + LangChain browser toolkit
+### Web scraping — Playwright (direct) with stealth context
 
-Structured scraping APIs (e.g. dedicated flight APIs) either require paid keys or have strict rate limits. Playwright gives a real browser that handles JavaScript rendering, cookie banners, and dynamic content. The LangChain `PlayWrightBrowserToolkit` wraps it in 7 LangChain tools, letting a ReAct agent navigate autonomously without brittle CSS selectors. A single shared browser instance (cached in `supervisor.py`) avoids the overhead of launching three separate browsers.
+Structured scraping APIs (e.g. dedicated flight APIs) either require paid keys or have strict rate limits. Playwright gives a real browser that handles JavaScript rendering, cookie banners, and dynamic content. We use Playwright's async API directly rather than the LangChain `PlayWrightBrowserToolkit` — the toolkit adds a ReAct loop on top of `page.goto` + `page.inner_text`, which is overhead without benefit when the URL is deterministic.
+
+A single shared `Browser` instance (cached in `supervisor.py` via `@st.cache_resource`) is reused across all three scrapers; each scrape opens its own `BrowserContext` with a randomised desktop user-agent, locale, and a `navigator.webdriver`-masking init script. This keeps the three sites isolated from each other while still amortising the browser launch cost.
 
 ### Structured outputs — Pydantic `with_structured_output`
 

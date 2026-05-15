@@ -111,9 +111,12 @@ if st.session_state.trip_query is not None and not st.session_state.search_done:
 
     with st.spinner("🔍 Searching flights, hotels and activities…"):
         try:
-            results: TripResults = asyncio.get_event_loop().run_until_complete(
-                run_search(query)
-            )
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            results: TripResults = loop.run_until_complete(run_search(query))
             st.session_state.trip_results = results
             st.session_state.search_done = True
         except Exception as e:

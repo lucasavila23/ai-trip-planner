@@ -1,44 +1,55 @@
 from __future__ import annotations
 
-import asyncio
-from urllib.parse import quote
+from urllib.parse import quote_plus
 
-from langchain_community.agent_toolkits import PlayWrightBrowserToolkit
+from playwright.async_api import Browser
 
 from config import get_llm
 from models.schemas import Activity, ActivityResults, TripQuery
+from scrapers._browser import fetch_page_text, looks_blocked, trim
 
-_BOT_SIGNALS = ["just a moment", "captcha", "access denied", "verify you are human", "ddos-guard"]
 
+async def search_activities(query: TripQuery, browser: Browser) -> list[Activity]:
+    """Scrape attractions/activities for the destination."""
+    dest_q = quote_plus(query.destination)
 
-async def search_activities(
-    query: TripQuery,
-    browser_toolkit: PlayWrightBrowserToolkit,
-) -> list[Activity]:
-    tools = browser_toolkit.get_tools()
-    navigate = next(t for t in tools if t.name == "navigate_browser")
-    extract = next(t for t in tools if t.name == "extract_text")
+    primary = f"https://www.getyourguide.com/s/?q={dest_q}&currency=EUR"
+    fallback = f"https://www.tripadvisor.com/Search?q={dest_q}+things+to+do"
 
-    dest = quote(query.destination)
-    url = f"https://www.getyourguide.com/s/?q={dest}"
+    raw_text = ""
+    for url in (primary, fallback):
+        raw_text = await fetch_page_text(
+            browser,
+            url,
+            wait_for_selector='[data-test-id*="activity"], article, [class*="card" i]',
+            extra_wait=4.0,
+        )
+        print("\n" + "=" * 60)
+        print(f"[ACTIVITIES] {url[:70]}")
+        print(f"[ACTIVITIES] length={len(raw_text)} first 300: {raw_text[:300]!r}")
+        print("=" * 60 + "\n")
+        if not looks_blocked(raw_text):
+            break
 
-    await navigate.arun(url)
-    await asyncio.sleep(5)
-    raw_text: str = await extract.arun("")
-
-    print("\n" + "=" * 60)
-    print("[ACTIVITIES] first 500 chars:")
-    print(raw_text[:500])
-    print("=" * 60 + "\n")
-
-    if not raw_text or len(raw_text) < 300 or any(s in raw_text.lower() for s in _BOT_SIGNALS):
-        raise Exception("Bot detection triggered on GetYourGuide")
+    if looks_blocked(raw_text):
+        return []
 
     structuring_llm = get_llm().with_structured_output(ActivityResults)
-    structured: ActivityResults = structuring_llm.invoke(
-        f"Extract activity/attraction information from the following text. "
-        f"For each activity choose the most fitting category from: "
-        f"culture, food, outdoor, nightlife, shopping, other. "
-        f"Price and duration are optional — set to null if not mentioned.\n\n{raw_text}"
-    )
-    return structured.activities
+    try:
+        structured: ActivityResults = structuring_llm.invoke(
+            "Extract activities / attractions from the following page text. "
+            "Rules:\n"
+            "- `category` MUST be one of: culture, food, outdoor, nightlife, "
+            "  shopping, other. Pick the best fit.\n"
+            "- `price_eur` and `duration` are optional — set to null if not "
+            "  visible.\n"
+            "- `description` is a one-sentence summary derived from the page.\n"
+            "- Skip rows that are clearly navigation links, not activities.\n"
+            "- Return at most 10 activities.\n\n"
+            f"PAGE TEXT:\n{trim(raw_text)}"
+        )
+    except Exception as e:
+        print(f"[ACTIVITIES] structuring failed: {e!r}")
+        return []
+
+    return structured.activities[:10]

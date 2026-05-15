@@ -1,51 +1,61 @@
 from __future__ import annotations
 
-import asyncio
-from urllib.parse import quote
+from urllib.parse import quote_plus
 
-from langchain_community.agent_toolkits import PlayWrightBrowserToolkit
+from playwright.async_api import Browser
 
 from config import get_llm
 from models.schemas import Hotel, HotelResults, TripQuery
+from scrapers._browser import fetch_page_text, looks_blocked, trim
 
-_BOT_SIGNALS = ["just a moment", "captcha", "access denied", "verify you are human", "ddos-guard"]
 
-
-async def search_hotels(
-    query: TripQuery,
-    browser_toolkit: PlayWrightBrowserToolkit,
-) -> list[Hotel]:
-    tools = browser_toolkit.get_tools()
-    navigate = next(t for t in tools if t.name == "navigate_browser")
-    extract = next(t for t in tools if t.name == "extract_text")
-
-    dest = quote(query.destination)
+async def search_hotels(query: TripQuery, browser: Browser) -> list[Hotel]:
+    """Scrape Booking.com for hotels matching the TripQuery."""
+    dest = quote_plus(query.destination)
     checkin = query.check_in.strftime("%Y-%m-%d")
     checkout = query.check_out.strftime("%Y-%m-%d")
-    url = (
-        f"https://www.booking.com/searchresults.html"
-        f"?ss={dest}&checkin={checkin}&checkout={checkout}&group_adults={query.num_people}"
+    nights = max((query.check_out - query.check_in).days, 1)
+
+    primary = (
+        "https://www.booking.com/searchresults.html"
+        f"?ss={dest}"
+        f"&checkin={checkin}&checkout={checkout}"
+        f"&group_adults={query.num_people}"
+        "&selected_currency=EUR"
+        "&order=popularity"
     )
 
-    await navigate.arun(url)
-    await asyncio.sleep(5)
-    raw_text: str = await extract.arun("")
-
+    raw_text = await fetch_page_text(
+        browser,
+        primary,
+        wait_for_selector='[data-testid="property-card"], [data-testid="title"]',
+        extra_wait=4.5,
+    )
     print("\n" + "=" * 60)
-    print("[HOTELS] first 500 chars:")
-    print(raw_text[:500])
+    print(f"[HOTELS] length={len(raw_text)} first 300: {raw_text[:300]!r}")
     print("=" * 60 + "\n")
 
-    if not raw_text or len(raw_text) < 300 or any(s in raw_text.lower() for s in _BOT_SIGNALS):
-        raise Exception("Bot detection triggered on Booking.com")
+    if looks_blocked(raw_text):
+        return []
 
-    nights = (query.check_out - query.check_in).days
     structuring_llm = get_llm().with_structured_output(HotelResults)
-    structured: HotelResults = structuring_llm.invoke(
-        f"Extract hotel information from the following text and return structured data. "
-        f"The stay is for {nights} night(s). "
-        f"Convert prices to EUR if needed. "
-        f"Set free_cancellation to true only if explicitly mentioned. "
-        f"Set rating as a float between 0-10 if available, otherwise null.\n\n{raw_text}"
-    )
-    return structured.hotels
+    try:
+        structured: HotelResults = structuring_llm.invoke(
+            "Extract hotel listings from the following Booking.com page text. "
+            f"The stay is {nights} night(s) for {query.num_people} guest(s). "
+            "Rules:\n"
+            "- Prices are already in EUR on this page; do not re-convert.\n"
+            "- `price_per_night_eur` = total price / nights (compute if only "
+            "  total is shown).\n"
+            "- `total_price_eur` = the displayed total for the whole stay.\n"
+            "- `rating` is a float 0-10 if visible, otherwise null.\n"
+            "- `free_cancellation` true only if the card explicitly says so.\n"
+            "- Skip rows with no price.\n"
+            "- Return at most 10 hotels, sorted by Booking's order.\n\n"
+            f"PAGE TEXT:\n{trim(raw_text)}"
+        )
+    except Exception as e:
+        print(f"[HOTELS] structuring failed: {e!r}")
+        return []
+
+    return structured.hotels[:10]

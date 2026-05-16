@@ -120,12 +120,16 @@ async def fetch_page_text(
     )
     await context.add_init_script(_STEALTH_INIT_JS)
 
-    # Skip Google's GDPR consent wall, which otherwise hides every flight/hotel
-    # result behind an interstitial. Same trick the Edge browser uses.
+    # Bypass GDPR consent walls on Google and Booking.com so results load
+    # without an interstitial blocking the page.
     await context.add_cookies([
         {"name": "CONSENT", "value": "YES+1", "domain": ".google.com", "path": "/"},
         {"name": "SOCS", "value": "CAESHAgBEhJnd3NfMjAyMzA4MjEtMF9SQzIaAmVuIAEaBgiAhcOnBg",
          "domain": ".google.com", "path": "/"},
+        {"name": "OptanonAlertBoxClosed", "value": "2024-01-01T00:00:00.000Z",
+         "domain": ".booking.com", "path": "/"},
+        {"name": "OptanonConsent", "value": "isGpcEnabled=0&datestamp=Mon+Jan+01+2024&version=6.33.0&isIABGlobal=false&hosts=&consentId=abc&interactionCount=1&landingPath=NotLandingPage&groups=C0001%3A1%2CC0002%3A1%2CC0003%3A1%2CC0004%3A1",
+         "domain": ".booking.com", "path": "/"},
     ])
 
     page: Page = await context.new_page()

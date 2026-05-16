@@ -12,11 +12,13 @@ from scrapers._browser import fetch_page_text, looks_blocked, trim
 def _has_flight_content(text: str) -> bool:
     """Reject pages that loaded but contain no actual flight data.
 
-    A real results page always shows at least one currency symbol AND at
-    least one routing keyword (nonstop / stop / hr / depart). A site
-    homepage or empty SPA shell would pass `looks_blocked` (it's long
-    enough, no captcha) but fail this check.
+    A real results page is always large (>5 000 chars) and shows at least
+    one currency symbol AND at least one routing keyword. The Google Flights
+    home/explore page is short (~3 000 chars) and passes the currency check
+    but fails the length threshold — so we gate on length first.
     """
+    if len(text) < 5_000:
+        return False
     low = text.lower()
     has_price = ("€" in text) or ("eur" in low) or ("$" in text) or ("£" in text)
     has_routing = any(kw in low for kw in ("nonstop", "non-stop", " stop", " hr ", "departing"))
@@ -48,8 +50,8 @@ async def search_flights(query: TripQuery, browser: Browser) -> list[Flight]:
 
     raw_text = ""
     for label, url, wait in (
-        ("google", google_url, 6.0),
-        ("kayak", kayak_url, 5.0),
+        ("google", google_url, 12.0),
+        ("kayak", kayak_url, 8.0),
     ):
         raw_text = await fetch_page_text(
             browser,

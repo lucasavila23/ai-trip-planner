@@ -29,7 +29,7 @@ async def search_hotels(query: TripQuery, browser: Browser) -> list[Hotel]:
         browser,
         primary,
         wait_for_selector='[data-testid="property-card"], [data-testid="title"]',
-        extra_wait=4.5,
+        extra_wait=9.0,
     )
     print("\n" + "=" * 60)
     print(f"[HOTELS] length={len(raw_text)} first 300: {raw_text[:300]!r}")

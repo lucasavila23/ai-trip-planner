@@ -12,17 +12,19 @@ from scrapers._browser import fetch_page_text, looks_blocked, trim
 def _has_flight_content(text: str) -> bool:
     """Reject pages that loaded but contain no actual flight data.
 
-    A real results page is always large (>5 000 chars) and shows at least
-    one currency symbol AND at least one routing keyword. The Google Flights
-    home/explore page is short (~3 000 chars) and passes the currency check
-    but fails the length threshold — so we gate on length first.
+    Google Flights renders results very compactly (~3 000 chars total) so a
+    pure length threshold doesn't work — the home/explore page and a real
+    results page differ by only a few hundred chars. Instead we look for
+    multiple price tokens (every result card carries one) plus a routing
+    keyword. The home page typically has ≤2 prices; a results page has 5+.
     """
-    if len(text) < 5_000:
+    if len(text) < 1_500:
         return False
     low = text.lower()
-    has_price = ("€" in text) or ("eur" in low) or ("$" in text) or ("£" in text)
-    has_routing = any(kw in low for kw in ("nonstop", "non-stop", " stop", " hr ", "departing"))
-    return has_price and has_routing
+    price_hits = text.count("€") + low.count(" eur") + text.count("$") + text.count("£")
+    has_routing = any(kw in low for kw in ("nonstop", "non-stop", " stop", " hr ", "round trip"))
+    has_results_marker = ("results returned" in low) or ("results matching" in low)
+    return has_routing and (price_hits >= 3 or has_results_marker)
 
 
 async def search_flights(query: TripQuery, browser: Browser) -> list[Flight]:
@@ -50,13 +52,13 @@ async def search_flights(query: TripQuery, browser: Browser) -> list[Flight]:
 
     raw_text = ""
     for label, url, wait in (
-        ("google", google_url, 12.0),
-        ("kayak", kayak_url, 8.0),
+        ("google", google_url, 15.0),
+        ("kayak", kayak_url, 10.0),
     ):
         raw_text = await fetch_page_text(
             browser,
             url,
-            wait_for_selector='[class*="result"], [aria-label*="flight" i], [role="listitem"]',
+            wait_for_selector='[role="listitem"], [aria-label*="flight" i], [class*="result"]',
             extra_wait=wait,
         )
         valid = (not looks_blocked(raw_text)) and _has_flight_content(raw_text)

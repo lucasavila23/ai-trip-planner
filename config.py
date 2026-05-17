@@ -3,7 +3,7 @@ import os
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 
-load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 
 GEMINI_API_KEY: str = os.environ.get("GEMINI_API_KEY", "")
 LLM_MODEL: str = "gemini-2.5-flash"
